@@ -20,13 +20,18 @@ function apm_display_admin_products() {
     if ($products) {
         foreach ($products as $product) {
             $image_path = !empty($product->Hinh) ? esc_url(get_stylesheet_directory_uri() . '/img/' . $product->Hinh) : esc_url(get_stylesheet_directory_uri() . '/img/placeholder.jpg');
+            $is_deleted = ((int)$product->TrangThai === 0);
             ?>
-            <div class="product-item">
+            <div class="product-item <?php echo $is_deleted ? 'product-deleted' : ''; ?>">
                 <img src="<?= $image_path ?>" alt="Ảnh sản phẩm" />
                 <h3><?= esc_html($product->TenHH) ?></h3>
                 <p>Giá: <?= number_format($product->DonGia, 0, ',', '.') ?>đ</p>
-                <button class="btn-edit" data-id="<?= esc_attr($product->MaHH) ?>" onclick="openEditForm(<?= esc_attr($product->MaHH) ?>)">Sửa</button>
-                <button class="btn-delete" data-id="<?= esc_attr($product->MaHH) ?>" onclick="deleteProduct(<?= esc_attr($product->MaHH) ?>)">Xóa</button>
+                <?php if (!$is_deleted) { ?>
+                    <button class="btn-edit" data-id="<?= esc_attr($product->MaHH) ?>" onclick="openEditForm(<?= esc_attr($product->MaHH) ?>)">Sửa</button>
+                    <button class="btn-delete" data-id="<?= esc_attr($product->MaHH) ?>" onclick="deleteProduct(<?= esc_attr($product->MaHH) ?>)">Xóa</button>
+                <?php } else { ?>
+                    <button class="btn-restore" data-id="<?= esc_attr($product->MaHH) ?>" onclick="restoreProduct(<?= esc_attr($product->MaHH) ?>)">Khôi phục</button>
+                <?php } ?>
             </div>
             <?php
         }
@@ -60,12 +65,17 @@ function filter_products() {
     if ($products) {
         foreach ($products as $product) {
             $image_path = !empty($product->Hinh) ? esc_url(get_stylesheet_directory_uri() . '/img/' . $product->Hinh) : esc_url(get_stylesheet_directory_uri() . '/img/placeholder.jpg');
-            echo '<div class="product-item">';
+            $is_deleted = ((int)$product->TrangThai === 0);
+            echo '<div class="product-item ' . ($is_deleted ? 'product-deleted' : '') . '">';
             echo '<img src="' . $image_path . '" alt="Ảnh sản phẩm" />';
             echo '<h3>' . esc_html($product->TenHH) . '</h3>';
             echo '<p>Giá: ' . number_format($product->DonGia, 0, ',', '.') . 'đ</p>';
-            echo '<button class="btn-edit" data-id="' . esc_attr($product->MaHH) . '" onclick="openEditForm(' . esc_attr($product->MaHH) . ')">Sửa</button>';
-            echo '<button class="btn-delete" data-id="' . esc_attr($product->MaHH) . '" onclick="deleteProduct(' . esc_attr($product->MaHH) . ')">Xóa</button>';
+            if (!$is_deleted) {
+                echo '<button class="btn-edit" data-id="' . esc_attr($product->MaHH) . '" onclick="openEditForm(' . esc_attr($product->MaHH) . ')">Sửa</button>';
+                echo '<button class="btn-delete" data-id="' . esc_attr($product->MaHH) . '" onclick="deleteProduct(' . esc_attr($product->MaHH) . ')">Xóa</button>';
+            } else {
+                echo '<button class="btn-restore" data-id="' . esc_attr($product->MaHH) . '" onclick="restoreProduct(' . esc_attr($product->MaHH) . ')">Khôi phục</button>';
+            }
             echo '</div>';
         }
     } else {
@@ -150,10 +160,11 @@ function handle_add_product() {
                 'SoLanXem' => 0,
                 'MoTa' => $mota ?: null,
                 'SoLanMua' => 0,
-                'SoLuongTonKho' => $soluongtonkho
+                'SoLuongTonKho' => $soluongtonkho,
+                'TrangThai' => 1
             ),
             array(
-                '%s', '%d', '%s', '%f', '%s', '%s', '%f', '%d', '%s', '%d', '%d'
+                '%s', '%d', '%s', '%f', '%s', '%s', '%f', '%d', '%s', '%d', '%d', '%d'
             )
         );
 
@@ -239,7 +250,7 @@ function handle_edit_product() {
     die();
 }
 
-// Xóa sản phẩm (AJAX)
+// Xóa sản phẩm (AJAX) - Xóa mềm
 function handle_delete_product() {
     if (!current_user_can('manage_options')) {
         wp_send_json_error(['message' => 'Bạn không có quyền xóa sản phẩm.']);
@@ -248,24 +259,89 @@ function handle_delete_product() {
 
     if (isset($_POST['mahh'])) {
         global $wpdb;
-
         $mahh = intval($_POST['mahh']);
-        $result = $wpdb->delete(
+
+        $result = $wpdb->update(
             'wp_hanghoa',
-            array('MaHH' => $mahh),
-            array('%d')
+            ['TrangThai' => 0],
+            ['MaHH' => $mahh],
+            ['%d'],
+            ['%d']
         );
 
         if ($result !== false) {
-            wp_send_json_success(['message' => 'Sản phẩm đã được xóa thành công!']);
+            wp_send_json_success(['message' => 'Sản phẩm đã được xóa thành công.']);
         } else {
             wp_send_json_error(['message' => 'Xóa sản phẩm không thành công. Lỗi: ' . $wpdb->last_error]);
         }
     } else {
-        wp_send_json_error(['message' => 'Không tìm thấy sản phẩm để xóa.']);
+        wp_send_json_error(['message' => 'Thiếu mã sản phẩm cần xóa.']);
     }
 
     die();
+}
+
+// Khôi phục sản phẩm (AJAX)
+function handle_restore_product() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message' => 'Bạn không có quyền khôi phục sản phẩm.']);
+        return;
+    }
+
+    if (isset($_POST['mahh'])) {
+        global $wpdb;
+        $mahh = intval($_POST['mahh']);
+
+        $result = $wpdb->update(
+            'wp_hanghoa',
+            ['TrangThai' => 1],
+            ['MaHH' => $mahh],
+            ['%d'],
+            ['%d']
+        );
+
+        if ($result !== false) {
+            wp_send_json_success(['message' => 'Sản phẩm đã được khôi phục thành công.']);
+        } else {
+            wp_send_json_error(['message' => 'Khôi phục sản phẩm không thành công. Lỗi: ' . $wpdb->last_error]);
+        }
+    } else {
+        wp_send_json_error(['message' => 'Thiếu mã sản phẩm cần khôi phục.']);
+    }
+
+    die();
+}
+
+// Hiển thị danh sách sản phẩm trong bảng
+function render_product_list() {
+    global $wpdb;
+    $products = $wpdb->get_results("SELECT * FROM wp_hanghoa");
+
+    echo '<table class="wp-list-table widefat fixed striped">';
+    echo '<thead><tr><th>Mã HH</th><th>Tên HH</th><th>Giá</th><th>Trạng thái</th><th>Hành động</th></tr></thead>';
+    echo '<tbody>';
+
+    foreach ($products as $product) {
+        $is_deleted = ((int)$product->TrangThai === 0);
+        echo '<tr class="' . ($is_deleted ? 'product-deleted' : '') . '">';
+        echo '<td>' . esc_html($product->MaHH) . '</td>';
+        echo '<td>' . esc_html($product->TenHH) . '</td>';
+        echo '<td>' . number_format($product->DonGia, 0, ',', '.') . 'đ</td>';
+        echo '<td>' . ($is_deleted ? 'Đã xóa' : 'Hoạt động') . '</td>';
+        echo '<td>';
+        echo '<form method="post" style="display:inline;">';
+        echo '<input type="hidden" name="mahh" value="' . esc_attr($product->MaHH) . '">';
+        if ($is_deleted) {
+            echo '<input type="submit" name="restore_product" value="Khôi phục" class="button button-secondary">';
+        } else {
+            echo '<input type="submit" name="delete_product" value="Xóa" class="button button-danger" onclick="return confirm(\'Bạn có chắc chắn muốn xóa?\')">';
+        }
+        echo '</form>';
+        echo '</td>';
+        echo '</tr>';
+    }
+
+    echo '</tbody></table>';
 }
 
 // Lấy thông tin sản phẩm để hiển thị trong form sửa (AJAX)
@@ -273,7 +349,7 @@ function get_product_data() {
     if (isset($_POST['mahh'])) {
         global $wpdb;
         $mahh = intval($_POST['mahh']);
-        $product = $wpdb->get_row($wpdb->prepare("SELECT * FROM wp_hanghoa WHERE MaHH = %d", $mahh));
+        $product = $wpdb->get_row($wpdb->prepare("SELECT * FROM wp_hanghoa WHERE MaHH = %d AND TrangThai = 1", $mahh));
 
         if ($product) {
             wp_send_json_success([
@@ -299,6 +375,7 @@ add_action('wp_ajax_nopriv_filter_products', 'filter_products');
 add_action('wp_ajax_add_product', 'handle_add_product');
 add_action('wp_ajax_edit_product', 'handle_edit_product');
 add_action('wp_ajax_delete_product', 'handle_delete_product');
+add_action('wp_ajax_restore_product', 'handle_restore_product');
 add_action('wp_ajax_get_product_data', 'get_product_data');
 
 function enqueue_admin_product_assets() {
@@ -309,7 +386,53 @@ function enqueue_admin_product_assets() {
     wp_localize_script('jquery', 'ajax_object', array(
         'ajaxurl' => admin_url('admin-ajax.php')
     ));
+
+    // Thêm JavaScript cho xử lý xóa và khôi phục sản phẩm
+    wp_add_inline_script('jquery', '
+        function deleteProduct(mahh) {
+            if (confirm("Bạn có chắc chắn muốn xóa sản phẩm này?")) {
+                jQuery.ajax({
+                    url: ajax_object.ajaxurl,
+                    type: "POST",
+                    data: {
+                        action: "delete_product",
+                        mahh: mahh
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            alert(response.data.message);
+                            location.reload();
+                        } else {
+                            alert(response.data.message);
+                        }
+                    }
+                });
+            }
+        }
+
+        function restoreProduct(mahh) {
+            if (confirm("Bạn có chắc chắn muốn khôi phục sản phẩm này?")) {
+                jQuery.ajax({
+                    url: ajax_object.ajaxurl,
+                    type: "POST",
+                    data: {
+                        action: "restore_product",
+                        mahh: mahh
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            alert(response.data.message);
+                            location.reload();
+                        } else {
+                            alert(response.data.message);
+                        }
+                    }
+                });
+            }
+        }
+    ');
 }
+
 add_action('wp_enqueue_scripts', 'enqueue_admin_product_assets'); // Frontend
 add_action('admin_enqueue_scripts', 'enqueue_admin_product_assets'); // Admin
 
