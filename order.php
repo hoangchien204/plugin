@@ -2,7 +2,7 @@
 /*
 Plugin Name: Order Management
 Description: Hiển thị lịch sử đơn hàng cho người dùng tùy chỉnh.
-Version: 1.7
+Version: 1.8
 Author: Bạn
 */
 
@@ -12,6 +12,146 @@ if (!defined('ABSPATH')) {
 }
 
 add_shortcode('order_history', 'render_order_history');
+
+// Xử lý hành động người dùng qua POST
+function handle_user_order_actions() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_POST['action']) || !isset($_POST['nonce'])) {
+        return;
+    }
+
+    global $wpdb;
+    $makh = isset($_COOKIE['custom_user_id']) ? intval($_COOKIE['custom_user_id']) : 0;
+    if (!$makh) {
+        return;
+    }
+
+    $action = sanitize_text_field($_POST['action']);
+    $paged = get_query_var('paged') ? get_query_var('paged') : 1;
+
+    // Trích xuất MaHD từ action (ví dụ: nhanhang_123)
+    $order_id = intval(substr($action, strrpos($action, '_') + 1));
+
+    // Kiểm tra nonce
+    if (!wp_verify_nonce(sanitize_text_field($_POST['nonce']), 'order_action_' . $order_id)) {
+        set_transient('order_message_' . $makh, 'Yêu cầu không hợp lệ.', 30);
+        wp_redirect(esc_url(add_query_arg('paged', $paged, home_url('/oder'))));
+        exit;
+    }
+
+    // Kiểm tra đơn hàng thuộc về người dùng
+    $order_exists = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->prefix}hoadon WHERE MaHD = %d AND MaKH = %d",
+        $order_id, $makh
+    ));
+
+    if (!$order_exists) {
+        set_transient('order_message_' . $makh, 'Không tìm thấy đơn hàng hoặc bạn không có quyền.', 30);
+        wp_redirect(esc_url(add_query_arg('paged', $paged, home_url('/oder'))));
+        exit;
+    }
+
+    $currentStatus = $wpdb->get_var($wpdb->prepare(
+        "SELECT MaTrangThai FROM {$wpdb->prefix}hoadon WHERE MaHD = %d",
+        $order_id
+    ));
+
+    // Xử lý hành động
+    if (strpos($action, 'nhanhang_') === 0) {
+        if ($currentStatus == 2) {
+            $wpdb->update("{$wpdb->prefix}hoadon", [
+                'MaTrangThai' => 3,
+                'NgayNhan' => current_time('mysql'),
+            ], ['MaHD' => $order_id]);
+
+            $tong_tien = $wpdb->get_var($wpdb->prepare("
+                SELECT SUM((DonGia - COALESCE(GiamGia, 0)) * SoLuong)
+                FROM {$wpdb->prefix}chitiethd
+                WHERE MaHD = %d
+            ", $order_id));
+
+            $wpdb->update("{$wpdb->prefix}hoadon", [
+                'TienDaNhan' => $tong_tien ?: 0
+            ], ['MaHD' => $order_id]);
+
+            set_transient('order_message_' . $makh, 'Đã được xác nhận nhận hàng.', 30);
+        } else {
+            set_transient('order_message_' . $makh, 'Đơn hàng không ở trạng thái phù hợp để nhận hàng.', 30);
+        }
+    } elseif (strpos($action, 'huydon_') === 0) {
+        if ($currentStatus == 7) {
+        // Khôi phục đơn hàng từ trạng thái "hoàn hàng" (trạng thái 7) về trạng thái "đang giao" (trạng thái 3)
+        $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 3], ['MaHD' => $order_id]);
+
+        // Cập nhật lại số lượng tồn kho của các sản phẩm trong đơn hàng khi khôi phục
+        $items = $wpdb->get_results($wpdb->prepare("
+            SELECT MaHH, SoLuong
+            FROM {$wpdb->prefix}chitiethd
+            WHERE MaHD = %d
+        ", $order_id));
+
+        foreach ($items as $item) {
+            $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}hanghoa
+                SET SoLuongTonKho = SoLuongTonKho - %d
+                WHERE MaHH = %d
+            ", $item->SoLuong, $item->MaHH));
+        }
+
+        set_transient('order_message_' . $makh, 'Đơn hàng #' . $order_id . ' đã được khôi phục.', 30);
+
+        } elseif ($currentStatus == 3 || $currentStatus == 0) {
+            // Hủy đơn hàng khi trạng thái là "đang giao" (trạng thái 3) hoặc "chưa xử lý" (trạng thái 0)
+            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => -1], ['MaHD' => $order_id]);
+
+            // Cập nhật lại số lượng tồn kho của các sản phẩm trong đơn hàng khi hủy
+            $items = $wpdb->get_results($wpdb->prepare("
+                SELECT MaHH, SoLuong
+                FROM {$wpdb->prefix}chitiethd
+                WHERE MaHD = %d
+            ", $order_id));
+
+            foreach ($items as $item) {
+                $wpdb->query($wpdb->prepare("
+                    UPDATE {$wpdb->prefix}hanghoa
+                    SET SoLuongTonKho = SoLuongTonKho + %d
+                    WHERE MaHH = %d
+                ", $item->SoLuong, $item->MaHH));
+            }
+
+            set_transient('order_message_' . $makh, 'Đơn hàng đã được hủy.', 30);
+
+        } else {
+            set_transient('order_message_' . $makh, 'Đơn hàng đã được hủy.', 30);
+        }
+    } elseif (strpos($action, 'hoanhang_') === 0) {
+        if (in_array($currentStatus, [2, 3])) {
+            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 7, 'TienDaNhan' => 0.00], ['MaHD' => $order_id]);
+
+            $items = $wpdb->get_results($wpdb->prepare("
+                SELECT MaHH, SoLuong
+                FROM {$wpdb->prefix}chitiethd
+                WHERE MaHD = %d
+            ", $order_id));
+
+            foreach ($items as $item) {
+                $wpdb->query($wpdb->prepare("
+                    UPDATE {$wpdb->prefix}hanghoa
+                    SET SoLuongTonKho = SoLuongTonKho + %d
+                    WHERE MaHH = %d
+                ", $item->SoLuong, $item->MaHH));
+            }
+
+            set_transient('order_message_' . $makh, 'Đơn hàng #' . $order_id . ' đã được yêu cầu hoàn hàng.', 30);
+        } else {
+            set_transient('order_message_' . $makh, 'Đơn hàng không ở trạng thái phù hợp để hoàn hàng.', 30);
+        }
+    }
+
+    // Chuyển hướng sạch
+    wp_redirect(esc_url(add_query_arg('paged', $paged, home_url('/oder'))));
+    exit;
+}
+add_action('init', 'handle_user_order_actions');
 
 function render_order_history() {
     global $wpdb;
@@ -24,167 +164,107 @@ function render_order_history() {
     }
 
     $makh = intval($_COOKIE['custom_user_id']);
+    $paged = get_query_var('paged') ? get_query_var('paged') : 1;
+    $orders_per_page = 5;
 
-    // Tự động cập nhật trạng thái sau 3 ngày
+    // Hiển thị thông báo nếu có
+    if ($message = get_transient('order_message_' . $makh)) {
+        echo '<div class="alert">' . esc_html($message) . '</div>';
+        delete_transient('order_message_' . $makh);
+    }
+
+    // Tự động cập nhật trạng thái đơn hàng sau 3 ngày
     $wpdb->query("
         UPDATE {$wpdb->prefix}hoadon
         SET MaTrangThai = 3
-        WHERE MaTrangThai IN (2, 3)
+        WHERE MaTrangThai = 2
           AND DATEDIFF(CURDATE(), NgayDat) > 3
     ");
 
-    // Xử lý Nhận hàng
-    if (isset($_GET['nhanhang']) && is_numeric($_GET['nhanhang'])) {
-        $mahd = intval($_GET['nhanhang']);
-        $wpdb->update("{$wpdb->prefix}hoadon", [
-            'MaTrangThai' => 3,
-            'NgayNhan' => current_time('mysql'),
-        ], ['MaHD' => $mahd]);
-
-        $tong_tien = $wpdb->get_var($wpdb->prepare("
-            SELECT SUM((DonGia - COALESCE(GiamGia, 0)) * SoLuong)
-            FROM {$wpdb->prefix}chitiethd
-            WHERE MaHD = %d
-        ", $mahd));
-
-        $wpdb->update("{$wpdb->prefix}hoadon", [
-            'TienDaNhan' => $tong_tien ?: 0
-        ], ['MaHD' => $mahd]);
-
-        wp_redirect(esc_url(remove_query_arg('nhanhang')));
-        exit;
-    }
-
-    // Xử lý Hủy đơn
-    if (isset($_GET['huydon']) && is_numeric($_GET['huydon'])) {
-        $mahd = intval($_GET['huydon']);
-        $currentStatus = $wpdb->get_var($wpdb->prepare("SELECT MaTrangThai FROM {$wpdb->prefix}hoadon WHERE MaHD = %d", $mahd));
-
-        if ($currentStatus == 7) {
-            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 3], ['MaHD' => $mahd]);
-        } elseif ($currentStatus == 3) {
-            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => -1], ['MaHD' => $mahd]);
-        }
-
-        wp_redirect(esc_url(remove_query_arg('huydon')));
-        exit;
-    }
-
-    // Xử lý Hoàn hàng
-    if (isset($_GET['hoanhang']) && is_numeric($_GET['hoanhang'])) {
-        $mahd = intval($_GET['hoanhang']);
-        $currentStatus = $wpdb->get_var($wpdb->prepare("SELECT MaTrangThai FROM {$wpdb->prefix}hoadon WHERE MaHD = %d", $mahd));
-
-        if (in_array($currentStatus, [2, 3])) {
-            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 7], ['MaHD' => $mahd]);
-            $wpdb->update("{$wpdb->prefix}hoadon", ['TienDaNhan' => 0.00], ['MaHD' => $mahd]);
-
-            $items = $wpdb->get_results($wpdb->prepare("
-                SELECT MaHH, SoLuong
-                FROM {$wpdb->prefix}chitiethd
-                WHERE MaHD = %d
-            ", $mahd));
-
-            foreach ($items as $item) {
-                $wpdb->query($wpdb->prepare("
-                    UPDATE {$wpdb->prefix}hanghoa
-                    SET SoLuongTonKho = SoLuongTonKho + %d
-                    WHERE MaHH = %d
-                ", $item->SoLuong, $item->MaHH));
-            }
-        }
-
-        wp_redirect(esc_url(remove_query_arg('hoanhang')));
-        exit;
-    }
-// Lấy số trang hiện tại
-    $paged = get_query_var('paged') ? get_query_var('paged') : 1;
-
-    // Số lượng đơn hàng trên mỗi trang
-    $orders_per_page = 1;
-
     // Lấy tổng số đơn hàng
-    $total_orders = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}hoadon");
+    $total_orders = $wpdb->get_var($wpdb->prepare("
+        SELECT COUNT(*) 
+        FROM {$wpdb->prefix}hoadon
+        WHERE MaKH = %d
+    ", $makh));
 
     // Tính số trang
     $total_pages = ceil($total_orders / $orders_per_page);
 
     // Lấy danh sách đơn hàng
-    $orders = $wpdb->get_results(
-        $wpdb->prepare("SELECT hd.*, tt.TenTrangThai
-                        FROM {$wpdb->prefix}hoadon hd
-                        LEFT JOIN trangthai tt ON hd.MaTrangThai = tt.MaTrangThai
-                        WHERE hd.MaKH = %d
-                        ORDER BY hd.NgayDat DESC", $makh)
-    );
+    $orders = $wpdb->get_results($wpdb->prepare("
+        SELECT hd.*, tt.TenTrangThai
+        FROM {$wpdb->prefix}hoadon hd
+        LEFT JOIN trangthai tt ON hd.MaTrangThai = tt.MaTrangThai
+        WHERE hd.MaKH = %d
+        ORDER BY hd.NgayDat DESC
+        LIMIT %d OFFSET %d
+    ", $makh, $orders_per_page, ($paged - 1) * $orders_per_page));
 
-    
-if ($orders) {
-    echo '<table class="order-history-table table table-bordered">';
-    echo '<thead><tr><th>Mã đơn</th><th>Ảnh</th><th>Ngày đặt</th><th>Ngày giao</th><th>Tổng tiền</th><th>Trạng thái</th><th>Hành động</th></tr></thead><tbody>';
+    // Hiển thị đơn hàng
+    if ($orders) {
+        echo '<table class="order-history-table table table-bordered">';
+        echo '<thead><tr><th>Mã đơn</th><th>Ảnh</th><th>Ngày đặt</th><th>Ngày giao</th><th>Tổng tiền</th><th>Trạng thái</th><th>Hành động</th></tr></thead><tbody>';
 
-    foreach ($orders as $order) {
-        $ngay_giao = date('Y-m-d', strtotime($order->NgayDat . ' +7 days'));
+        foreach ($orders as $order) {
+            $ngay_giao = date('Y-m-d', strtotime($order->NgayDat . ' +7 days'));
+            $first_item = $wpdb->get_row($wpdb->prepare("
+                SELECT hh.Hinh, hh.TenHH
+                FROM {$wpdb->prefix}chitiethd ct
+                JOIN {$wpdb->prefix}hanghoa hh ON ct.MaHH = hh.MaHH
+                WHERE ct.MaHD = %d
+                LIMIT 1", $order->MaHD));
 
-        $first_item = $wpdb->get_row($wpdb->prepare("
-            SELECT hh.Hinh, hh.TenHH
-            FROM {$wpdb->prefix}chitiethd ct
-            JOIN {$wpdb->prefix}hanghoa hh ON ct.MaHH = hh.MaHH
-            WHERE ct.MaHD = %d
-            LIMIT 1", $order->MaHD));
+            $image_url = !empty($first_item->Hinh)
+                ? esc_url(get_template_directory_uri() . '/img/' . $first_item->Hinh)
+                : 'https://via.placeholder.com/80';
 
-        $image_url = !empty($first_item->Hinh)
-            ? esc_url(get_template_directory_uri() . '/img/' . $first_item->Hinh)
-            : 'https://via.placeholder.com/80';
+            echo '<tr>';
+            echo '<td>' . esc_html($order->MaHD) . '</td>';
+            echo '<td><img src="' . $image_url . '" width="80" alt="' . esc_attr($first_item->TenHH ?? '') . '"></td>';
+            echo '<td>' . date('Y-m-d', strtotime($order->NgayDat)) . '</td>';
+            echo '<td>' . esc_html($ngay_giao) . '</td>';
+            echo '<td>' . number_format($order->TongTien, 0, ',', '.') . 'đ</td>';
+            echo '<td>' . esc_html($order->TenTrangThai) . '</td>';
 
-        $hide_return_button = false;
-        if ($order->NgayNhan) {
-            $date_diff = (strtotime(current_time('mysql')) - strtotime($order->NgayNhan)) / (60 * 60 * 24);
-            if ($date_diff > 1) $hide_return_button = true;
+            echo '<td>';
+            echo '<a href="' . esc_url(add_query_arg(['mahd' => $order->MaHD])) . '" class="btn btn-sm btn-primary">Xem</a> ';
+            echo '<form method="post" style="display:inline;">';
+            echo wp_nonce_field('order_action_' . $order->MaHD, 'nonce', true, false);
+
+            if ($order->MaTrangThai == 2) {
+                echo '<button type="submit" name="action" value="nhanhang_' . esc_attr($order->MaHD) . '" class="btn btn-sm btn-success" onclick="return confirm(\'Xác nhận bạn đã nhận hàng?\')">Đã nhận hàng</button> ';
+            }
+
+            if ($order->MaTrangThai == 3) {
+                echo '<button type="submit" name="action" value="hoanhang_' . esc_attr($order->MaHD) . '" class="btn btn-sm btn-danger" onclick="return confirm(\'Bạn chắc chắn muốn hoàn hàng?\')">Hoàn hàng</button> ';
+            }
+
+            if (!in_array($order->MaTrangThai, [2, 3, 7])) {
+                echo '<button type="submit" name="action" value="huydon_' . esc_attr($order->MaHD) . '" class="btn btn-sm btn-danger" onclick="return confirm(\'Bạn chắc chắn muốn hủy đơn hàng này?\')">Hủy</button>';
+            }
+
+            echo '</form>';
+            echo '</td>';
+            echo '</tr>';
         }
 
-        echo '<tr>';
-        echo '<td>' . esc_html($order->MaHD) . '</td>';
-        echo '<td><img src="' . $image_url . '" width="80" alt="' . esc_attr($first_item->TenHH ?? '') . '"></td>';
-        echo '<td>' . date('Y-m-d', strtotime($order->NgayDat)) . '</td>';
-        echo '<td>' . esc_html($ngay_giao) . '</td>';
-        echo '<td>' . number_format($order->TongTien, 0, ',', '.') . 'đ</td>';
-        echo '<td>' . esc_html($order->TenTrangThai) . '</td>';
+        echo '</tbody></table>';
 
-        echo '<td>';
-        echo '<a href="' . esc_url(add_query_arg(['mahd' => $order->MaHD])) . '" class="btn btn-sm btn-primary">Xem</a> ';
 
-        if ($order->MaTrangThai == 2) {
-            echo '<a href="' . esc_url(add_query_arg(['nhanhang' => $order->MaHD])) . '" class="btn btn-sm btn-success" onclick="return confirm(\'Xác nhận bạn đã nhận hàng?\')">Đã nhận hàng</a> ';
-        }
-
-        if (!$hide_return_button && in_array($order->MaTrangThai, [2, 3]) && $order->MaTrangThai != 7) {
-            echo '<a href="' . esc_url(add_query_arg(['hoanhang' => $order->MaHD])) . '" class="btn btn-sm btn-danger" onclick="return confirm(\'Bạn chắc chắn muốn hoàn hàng?\')">Hoàn hàng</a> ';
-        }
-
-        if (!in_array($order->MaTrangThai, [2, 3, 7])) {
-            echo '<a href="' . esc_url(add_query_arg(['huydon' => $order->MaHD])) . '" class="btn btn-sm btn-danger" onclick="return confirm(\'Bạn chắc chắn muốn hủy đơn hàng này?\')">Hủy</a>';
-        }
-
-        echo '</td>';
-        echo '</tr>';
+        // Phân trang
+        $pagination_args = [
+            'base' => esc_url(add_query_arg('paged', '%#%')),
+            'format' => '?paged=%#%',
+            'current' => $paged,
+            'total' => $total_pages,
+            'prev_text' => '« Trước',
+            'next_text' => 'Sau »',
+        ];
+        echo '<div class="pagination">' . paginate_links($pagination_args) . '</div>';
+    } else {
+        echo '<p class="no-orders">Bạn chưa có đơn hàng nào.</p>';
     }
-
-    echo '</tbody></table>';
-
-    // Phân trang
-    $pagination_args = [
-        'base' => esc_url(add_query_arg('paged', '%#%')),
-        'format' => '?paged=%#%',
-        'current' => $paged,
-        'total' => $total_pages,
-        'prev_text' => '&laquo; Trước',
-        'next_text' => 'Sau &raquo;',
-    ];
-    echo '<div class="pagination">' . paginate_links($pagination_args) . '</div>';
-} else {
-    echo '<p class="no-orders">Bạn chưa có đơn hàng nào.</p>';
-}
 
     // Hiển thị lớp phủ chi tiết đơn hàng nếu có tham số mahd
     if (isset($_GET['mahd']) && is_numeric($_GET['mahd'])) {
@@ -198,7 +278,7 @@ if ($orders) {
         ));
 
         $order_info = $wpdb->get_row($wpdb->prepare(
-            "SELECT SDT, DiaChi, NgayDat, TongTien
+            "SELECT SDT, DiaChi, NgayDat, TongTien, PhiVanChuyen
              FROM {$wpdb->prefix}hoadon
              WHERE MaHD = %d AND MaKH = %d",
             $mahd, $makh
@@ -210,7 +290,7 @@ if ($orders) {
             echo '<h3>Chi Tiết Đơn Hàng #' . esc_html($mahd) . '</h3>';
             echo '<p><strong>SĐT:</strong> ' . esc_html($order_info->SDT ?: 'Chưa có thông tin') . ' | <strong>Địa Chỉ:</strong> ' . esc_html($order_info->DiaChi ?: 'Chưa có thông tin') . '</p>';
             echo '<table class="order-history-table table table-bordered">';
-            echo '<thead><tr><th>Ảnh</th><th>Tên Sản Phẩm</th><th>Ngày</th><th>Số Lượng</th><th>Đơn Giá</th><th>Tổng Tiền</th></tr></thead><tbody>';
+            echo '<thead><tr><th>Ảnh</th><th>Tên Sản Phẩm</th><th>Ngày</th><th>Số Lượng</th><th>Đơn Giá</th><th>Tổng Tiền</th><th>Phí Vận Chuyển</th></tr></thead><tbody>';
 
             $ngay_dat = $order_info->NgayDat;
             foreach ($order_details as $detail) {
@@ -226,10 +306,12 @@ if ($orders) {
                 echo '<td>' . esc_html($detail->SoLuong) . '</td>';
                 echo '<td>' . number_format($don_gia_hien_tai, 0, ',', '.') . 'đ</td>';
                 echo '<td>' . number_format($tong_tien_item, 0, ',', '.') . 'đ</td>';
+                echo '<td>' . ($order_info->PhiVanChuyen ? number_format($order_info->PhiVanChuyen, 0, ',', '.') . 'đ' : 'Miễn phí') . '</td>';
                 echo '</tr>';
             }
             echo '</tbody></table>';
             echo '<p style="text-align: right; font-weight: bold; margin-top: 10px;">Tổng tiền: ' . number_format($order_info->TongTien, 0, ',', '.') . 'đ</p>';
+            echo '<p style="text-align: right; font-weight: bold;">Phí vận chuyển: ' . ($order_info->PhiVanChuyen ? number_format($order_info->PhiVanChuyen, 0, ',', '.') . 'đ' : 'Miễn phí') . '</p>';
             echo '<a href="' . esc_url(remove_query_arg('mahd')) . '" class="btn btn-sm btn-secondary">Đóng</a>';
             echo '</div>';
             echo '</div>';
@@ -240,7 +322,6 @@ if ($orders) {
 
     return ob_get_clean();
 }
-
 function add_order_management_styles() {
     ?>
     <style>

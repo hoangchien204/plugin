@@ -21,7 +21,7 @@ function admin_order_list_shortcode() {
 
     // Phân trang
     $paged = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
-    $per_page = 10;
+    $per_page = 6;
     $offset = ($paged - 1) * $per_page;
 
     // Tổng số đơn hàng
@@ -52,24 +52,12 @@ function admin_order_list_shortcode() {
         ?>
         <div class="order-management-container">
             <!-- Nút giao hàng hàng loạt -->
-             <div class="ngang">
-            <form method="post" action="" class="bulk-delivery-form">
-            <!-- Nút giao hàng hàng loạt -->
-            <button type="submit" name="action" value="bulk_mark_as_delivered" class="btn btn-bulk-deliver">Giao Hàng Hàng Loạt</button>
-        </form>
-
-        <!-- Lọc theo thời gian -->
-        <!-- <form method="get" action="" class="date-filter-form">
-            <div class="filter-date">
-                <label for="start_date">Từ ngày:</label>
-                <input type="date" name="start_date" id="start_date" value="<?php echo isset($_GET['start_date']) ? esc_attr($_GET['start_date']) : ''; ?>">
-                <label for="end_date">Đến ngày:</label>
-                <input type="date" name="end_date" id="end_date" value="<?php echo isset($_GET['end_date']) ? esc_attr($_GET['end_date']) : ''; ?>">
-                <button type="submit" class="btn btn-filter">Lọc</button>
-            </div>
-        </form> -->
-        </div>
+            
         <form method="post" action="">
+            <div class="ngang">
+        <button type="submit" name="action" value="bulk_mark_as_delivered" class="btn btn-bulk-deliver">Giao Hàng Hàng Loạt</button>
+    </div>
+
             <table class="order-table">
                 <thead>
                     <tr>
@@ -224,12 +212,31 @@ function handle_order_actions() {
         ));
 
         if (strpos($action, 'cancel_order_') === 0) {
-            if ($current_status == -1) {
-                return;
-            }
-            $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 6], ['MaHD' => $order_id]);
+        // Kiểm tra nếu đơn hàng đã hủy (trạng thái -1), không làm gì thêm
+        if ($current_status == -1) {
+            return;
         }
 
+        // Cập nhật trạng thái đơn hàng thành "Đã hủy" (trạng thái 6)
+        $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 6], ['MaHD' => $order_id]);
+
+        // Lấy thông tin các sản phẩm trong đơn hàng
+        $items = $wpdb->get_results($wpdb->prepare("
+            SELECT MaHH, SoLuong
+            FROM {$wpdb->prefix}chitiethd
+            WHERE MaHD = %d
+        ", $order_id));
+
+        // Cập nhật số lượng tồn kho của các sản phẩm bị hủy trong đơn hàng
+        foreach ($items as $item) {
+            // Cập nhật lại số lượng tồn kho (tăng thêm số lượng sản phẩm)
+            $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}hanghoa
+                SET SoLuongTonKho = SoLuongTonKho + %d
+                WHERE MaHH = %d
+            ", $item->SoLuong, $item->MaHH));
+        }
+    }
         if (strpos($action, 'ship_order_') === 0) {
             $wpdb->update("{$wpdb->prefix}hoadon", ['MaTrangThai' => 1], ['MaHD' => $order_id]);
         }
@@ -240,6 +247,16 @@ function handle_order_actions() {
                 'NgayGiao' => current_time('mysql')
             ], ['MaHD' => $order_id]);
         }
+        if ($action === 'bulk_mark_as_delivered' && isset($_POST['selected_orders'])) {
+    $selected_orders = array_map('intval', $_POST['selected_orders']);
+    foreach ($selected_orders as $order_id) {
+        $wpdb->update("{$wpdb->prefix}hoadon", [
+            'MaTrangThai' => 2,
+            'NgayGiao' => current_time('mysql')
+        ], ['MaHD' => $order_id]);
+    }
+}
+
     }
 }
 add_action('init', 'handle_order_actions');
@@ -340,10 +357,11 @@ function export_order_to_excel() {
 function admin_order_management_styles() {
     ?>
     <style>
+      
         .order-management-container {
             max-width: 98%;
-            margin: 2rem auto;
-            padding: 0 1rem;
+            /* margin: 2rem auto; */
+            /* padding: 0 1rem; */
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background-color: #f9fafb;
             border-radius: 12px;
@@ -352,41 +370,36 @@ function admin_order_management_styles() {
         }
 
         
-.bulk-delivery-form, .date-filter-form {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 20px;
-    align-items: center;
-}
+        .bulk-delivery-form, .date-filter-form {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
 
-.bulk-delivery-form {
-    justify-content: flex-end;
-}
+        .date-filter-form .filter-date {
+            display: flex;
+            gap: 10px;
+        }
 
-.date-filter-form .filter-date {
-    display: flex;
-    gap: 10px;
-}
+        .date-filter-form .filter-date label {
+            margin-right: 5px;
+        }
 
-.date-filter-form .filter-date label {
-    margin-right: 5px;
-}
+        .date-filter-form .filter-date input {
+            padding: 5px;
+            margin-right: 10px;
+        }
 
-.date-filter-form .filter-date input {
-    padding: 5px;
-    margin-right: 10px;
-}
-
-.date-filter-form .filter-date button {
-    padding: 5px 10px;
-}
-.ngang{
-    display: flex;
-    justify-content: flex-end;
-}
-.ngang button{
-    background: #10B981
-}
+        .date-filter-form .filter-date button {
+            padding: 5px 10px;
+        }
+        .ngang{
+            display: flex;
+            justify-content: flex-end;
+        }
+        .ngang button{
+            background: #10B981
+        }
         .order-table {
             width: 100%;
             border-collapse: collapse;
