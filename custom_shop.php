@@ -8,53 +8,37 @@
 
 if (!defined('ABSPATH')) exit;
 
-// Đăng ký shortcode [custom_shop]
-function mpl_render_product_list($atts) {
-    global $wpdb;  // Sử dụng $wpdb để truy vấn cơ sở dữ liệu
-
-    ob_start();
-
-    // Truy vấn dữ liệu từ bảng wp_hanghoa
-    $results = $wpdb->get_results("
-        SELECT * FROM {$wpdb->prefix}hanghoa
-        ORDER BY MaHH DESC
-        LIMIT 12
-    ");
-
-    if ($results) :
-        echo '<div class="mpl-product-grid" style="display:flex;flex-wrap:wrap;gap:20px;">';
-        foreach ($results as $product) :
-            // Lấy dữ liệu từ bảng wp_hanghoa
-            $product_name = $product->TenHH;
-            $price = $product->DonGia;
-            $sales = $product->SoLanMua;
-            $image_path = get_template_directory_uri() . '/img/' . $product->Hinh;  // Đảm bảo bạn lưu ảnh trong thư mục đúng
-
-            ?>
-            <div class="mpl-product-item" style="width:200px;border:1px solid #ddd;padding:10px;">
-                <a href="#">
-                    <!-- Hiển thị hình ảnh -->
-                    <?php if ($product->Hinh) : ?>
-                        <div class="mpl-thumbnail">
-                            <img src="<?php echo $image_path; ?>" alt="<?php echo esc_attr($product_name); ?>" style="width:100%;">
-                        </div>
-                    <?php endif; ?>
-                    <!-- Tên sản phẩm -->
-                    <h3 class="mpl-title" style="font-size:16px;"><?php echo esc_html($product_name); ?></h3>
-                    <!-- Giá sản phẩm -->
-                    <p class="mpl-price"><?php echo number_format($price, 0, ',', '.'); ?> VND</p>
-                    <!-- Lượt bán -->
-                    <p class="mpl-sales">Đã bán: <?php echo $sales ? $sales : 0; ?></p>
-                </a>
-            </div>
-            <?php
-        endforeach;
-        echo '</div>';
-    else :
-        echo '<p>Không có sản phẩm nào.</p>';
-    endif;
-
-    return ob_get_clean();
+// Hàm lấy danh sách danh mục
+function myshop_get_categories() {
+    global $wpdb;
+    return $wpdb->get_results("SELECT MaLoai, TenLoai FROM {$wpdb->prefix}loai");
+}
+function myshop_get_category_name($maloai) {
+    global $wpdb;
+    return $wpdb->get_var($wpdb->prepare("SELECT TenLoai FROM {$wpdb->prefix}loaihanghoa WHERE MaLoai = %d", $maloai));
 }
 
-add_shortcode('custom_shop', 'mpl_render_product_list');
+// Hàm lấy sản phẩm (có thể lọc theo mã loại)
+function myshop_get_products($maloai = 0, $limit = 0, $offset = 0) {
+    global $wpdb;
+    $where = "WHERE TrangThai = 1";
+    if ($maloai > 0) {
+        $where .= " AND MaLoai = " . intval($maloai);
+    }
+
+    $limit_offset = '';
+    if ($limit > 0) {
+        $limit_offset = "LIMIT " . intval($limit);
+        if ($offset > 0) {
+            $limit_offset .= " OFFSET " . intval($offset);
+        }
+    }
+
+    return $wpdb->get_results("
+        SELECT MaHH, TenHH, DonGia, SoLanMua, Hinh, SoLuongTonKho
+        FROM {$wpdb->prefix}hanghoa
+        $where
+        ORDER BY MaHH DESC
+        $limit_offset
+    ");
+}
